@@ -4,8 +4,9 @@ use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use hmac::{Hmac, Mac};
 use protobuf::Message;
 use rand::RngCore;
-use rsa::{BigUint, Pkcs1v15Sign, RsaPublicKey};
-use sha1::{Digest, Sha1};
+use rsa::{BoxedUint, PublicKey};
+use sha1::Sha1;
+use sha1_rsa::Sha1 as RsaSha1;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Framed};
@@ -73,19 +74,22 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .to_owned();
 
     // Prevent man-in-the-middle attacks: check server signature
-    let n = BigUint::from_bytes_be(&SERVER_KEY);
-    let e = BigUint::new(vec![65537]);
-    let public_key = RsaPublicKey::new(n, e).map_err(|_| {
+    let n = BoxedUint::from_be_slice(&SERVER_KEY, SERVER_KEY.len() as u32 * 8).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            HandshakeError::VerificationFailed,
+        )
+    })?;
+    let e = BoxedUint::from(65537u64);
+    let public_key = PublicKey::new(n, e).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             HandshakeError::VerificationFailed,
         )
     })?;
 
-    let hash = Sha1::digest(&remote_key);
-    let padding = Pkcs1v15Sign::new::<Sha1>();
     public_key
-        .verify(padding, &hash, &remote_signature)
+        .pkcs1v15_verify::<RsaSha1>(&remote_key, &remote_signature)
         .map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
